@@ -1,0 +1,87 @@
+# EN: One service, no database — linkly's store is in-memory on purpose, so the
+#     interesting parts (cache, queue, back pressure, shutdown ordering) stay
+#     visible without a container of Postgres in the way. Swapping store.Memory for
+#     a real store is a single interface implementation; that is the point of
+#     keeping the port narrow in internal/store.
+# TR: Tek servis, veritabanı yok — linkly'nin deposu bilinçli olarak bellek içi,
+#     böylece ilginç kısımlar (cache, kuyruk, back pressure, kapatma sırası) araya
+#     bir Postgres konteyneri girmeden görünür kalıyor. store.Memory'yi gerçek bir
+#     depoyla değiştirmek tek bir arayüz implementasyonu; internal/store'daki portu
+#     dar tutmanın sebebi bu.
+services:
+  linkly:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    image: linkly:local
+    ports:
+      - "8080:8080"
+    environment:
+      LINKLY_ADDR: ":8080"
+      LINKLY_BASE_URL: "http://localhost:8080"
+      LINKLY_CACHE_TTL: "5m"
+      LINKLY_CACHE_NEG_TTL: "10s"
+      LINKLY_CACHE_JITTER: "0.2"
+      LINKLY_RATE_PER_SEC: "50"
+      LINKLY_RATE_BURST: "100"
+      # EN: Ship a new limit in dry-run first, watch linkly_ratelimit_would_reject,
+      #     and only then flip this to false. The most expensive mistake in rate
+      #     limiting is a number that cuts legitimate traffic — and you can only get
+      #     that number from the measured distribution, never from a meeting.
+      # TR: Yeni bir limiti önce dry-run ile çıkar, linkly_ratelimit_would_reject'i
+      #     izle, ancak ondan sonra bunu false yap. Rate limiting'deki en pahalı
+      #     hata, meşru trafiği kesen bir sayı — ve o sayıyı yalnızca ölçülen
+      #     dağılımdan alabilirsin, bir toplantıdan asla.
+      LINKLY_RATE_DRY_RUN: "false"
+      LINKLY_REQUEST_TIMEOUT: "3s"
+      LINKLY_SHUTDOWN_TIMEOUT: "15s"
+
+    # EN: Give the process enough time to drain. Docker sends SIGTERM, waits
+    #     stop_grace_period, then SIGKILLs. If this is shorter than
+    #     LINKLY_SHUTDOWN_TIMEOUT, the drain is cut off mid-flush and you lose the
+    #     tail of the analytics queue — silently, with no error anywhere.
+    #     The two numbers are a contract; keep grace > app timeout.
+    # TR: Sürece boşaltmak için yeterli süre ver. Docker SIGTERM gönderir,
+    #     stop_grace_period bekler, sonra SIGKILL atar. Bu süre
+    #     LINKLY_SHUTDOWN_TIMEOUT'tan kısaysa drain, flush'ın ortasında kesilir ve
+    #     analitik kuyruğunun kuyruğunu kaybedersin — sessizce, hiçbir yerde hata
+    #     olmadan. İki sayı bir sözleşme; grace > uygulama timeout'u olmalı.
+    stop_grace_period: 20s
+
+    restart: unless-stopped
+
+    # EN: Belt and braces on top of USER nonroot in the Dockerfile.
+    #     read_only + no-new-privileges + dropped capabilities means that even if
+    #     something in the process is compromised, there is nowhere to write and
+    #     nothing to escalate to. Defence in depth: independent controls, so one
+    #     failing does not open the door.
+    # TR: Dockerfile'daki USER nonroot'un üstüne kemer ve askı.
+    #     read_only + no-new-privileges + düşürülmüş yetenekler, süreçte bir şey ele
+    #     geçirilse bile yazacak bir yer ve yükselecek bir şey bırakmıyor. Katmanlı
+    #     savunma: bağımsız kontroller, biri düşerse kapı açılmıyor.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # EN: A memory limit is not paperwork. The cache and the analytics queue are
+    #     both bounded in code precisely so this limit is never the thing that
+    #     stops them — but if a bug does leak, you want OOMKilled on one replica
+    #     rather than a node dragging its neighbours down with it.
+    # TR: Bellek limiti evrak işi değil. Cache de analitik kuyruğu da kodda zaten
+    #     sınırlı, tam da bu limit onları durduran şey olmasın diye — ama yine de
+    #     bir sızıntı olursa, tek bir replikanın OOMKilled olmasını, bir node'un
+    #     komşularını da aşağı çekmesine tercih edersin.
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+    healthcheck:
+      test: ["CMD", "/linkly", "healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
